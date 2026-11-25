@@ -1,0 +1,46 @@
+name: Tests
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python ${{ matrix.python }} / Pillow ${{ matrix.pillow || 'latest' }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Oldest Pillow allowed by ComfyUI's requirements, and the latest release.
+          - python: "3.10"
+            pillow: "==10.1.0"
+            os: ubuntu-latest
+          - python: "3.13"
+            pillow: ""
+            os: ubuntu-latest
+          - python: "3.13"
+            pillow: ""
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install "pillow${{ matrix.pillow }}" numpy pytest
+      - run: python -m pytest -v tests
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node --import ./tests/js/register.mjs --test tests/js/*.test.mjs
