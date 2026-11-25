@@ -9,21 +9,23 @@ const JPEG_WIDGETS = ["jpeg_quality", "jpeg_subsampling", "jpeg_optimize", "jpeg
 // their values and are still serialized, so switching formats, duplicating the
 // node or reloading a workflow preserves them. When file_type is driven by a
 // link its runtime value is unknown here, so the JPEG widgets stay visible.
-// Frontends without widget.hidden support simply keep showing all widgets.
+// A JPEG widget whose own input is linked also stays visible, since the link
+// is drawn to its row. Frontends without widget.hidden support simply keep
+// showing all widgets.
 export function updateJpegWidgets(node, resize)
 {
   const fileType = node.widgets?.find(w => w.name === FILE_TYPE_WIDGET);
   if (!fileType)
     return;
 
-  const fileTypeInput = node.inputs?.find(i => i.widget?.name === FILE_TYPE_WIDGET);
-  const hidden = fileType.value !== FILE_TYPE_JPEG && fileTypeInput?.link == null;
+  const isLinked = name => node.inputs?.some(i => i.widget?.name === name && i.link != null);
+  const hidden = fileType.value !== FILE_TYPE_JPEG && !isLinked(FILE_TYPE_WIDGET);
 
   const heightBefore = node.computeSize()[1];
   for (const widget of node.widgets)
   {
     if (JPEG_WIDGETS.includes(widget.name))
-      widget.hidden = hidden;
+      widget.hidden = hidden && !isLinked(widget.name);
   }
   const minSize = node.computeSize();
 

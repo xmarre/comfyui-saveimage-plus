@@ -11,22 +11,27 @@ from PIL.PngImagePlugin import PngInfo
 # stream at the end of encoding and cannot flush Pillow's output buffer midway.
 # Pillow sizes that buffer at 1 byte per pixel (2 for quality >= 95), which
 # high-entropy images (heavy grain or noise) can exceed, failing with
-# "broken data stream when writing image file". ImageFile.MAXBLOCK is the
-# lower bound Pillow applies to that buffer, so it is raised for the duration
-# of such saves. The bound below is about 1.7x the largest bitrate observed
-# with libjpeg-turbo (binary noise, quality 100, 4:4:4); exceeding it still
-# raises Pillow's error. The buffer is allocated but only the bytes actually
-# written are touched.
+# "broken data stream when writing image file" ("encoder error -2" in older
+# Pillow). Such a save is repeated with the same settings while
+# ImageFile.MAXBLOCK, the lower bound Pillow applies to that buffer, is raised.
+# MAXBLOCK is process-wide, so it is only raised when needed. The bound is
+# about 2.5x the largest optimized or progressive output observed with
+# libjpeg-turbo (binary noise, quality 100, 4:4:4); if the retry still fails,
+# its error is raised.
 _JPEG_MAX_BYTES_PER_PIXEL = 8
 _JPEG_MARKER_HEADROOM = 65536
 _jpeg_buffer_lock = threading.Lock()
 
 
 def _save_jpeg(img, path, **kwargs):
-    if not (kwargs.get("optimize") or kwargs.get("progressive")):
+    try:
         img.save(path, **kwargs)
         return
-    # Dimensions padded to whole 16x16 MCUs, since libjpeg encodes the padding.
+    except OSError:
+        if not (kwargs.get("optimize") or kwargs.get("progressive")):
+            raise
+    # Pillow removed the partially written file. Dimensions are padded to
+    # whole 16x16 MCUs, since libjpeg encodes the padding.
     width = -(-img.size[0] // 16) * 16
     height = -(-img.size[1] // 16) * 16
     bufsize = width * height * _JPEG_MAX_BYTES_PER_PIXEL + _JPEG_MARKER_HEADROOM
@@ -83,8 +88,8 @@ class SaveImagePlus:
         }
 
     def save_images(self, images, filename_prefix="ComfyUI", file_type=FILE_TYPE_PNG, remove_metadata=False,
-                    jpeg_quality=90, jpeg_subsampling="4:4:4", jpeg_optimize=True, jpeg_progressive=False,
-                    prompt=None, extra_pnginfo=None):
+                    prompt=None, extra_pnginfo=None,
+                    jpeg_quality=90, jpeg_subsampling="4:4:4", jpeg_optimize=True, jpeg_progressive=False):
         output_dir = folder_paths.get_output_directory()
         full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(filename_prefix, output_dir, images[0].shape[1], images[0].shape[0])
         extension = {
@@ -93,8 +98,12 @@ class SaveImagePlus:
             self.FILE_TYPE_WEBP_LOSSLESS: "webp",
             self.FILE_TYPE_WEBP_LOSSY: "webp",
         }.get(file_type, "png")
-        if file_type == self.FILE_TYPE_JPEG and jpeg_subsampling not in self.JPEG_SUBSAMPLING:
-            raise ValueError(f"Unsupported JPEG chroma subsampling: {jpeg_subsampling!r}")
+        if file_type == self.FILE_TYPE_JPEG:
+            # Also checked here because linked inputs bypass ComfyUI's range checks.
+            if jpeg_subsampling not in self.JPEG_SUBSAMPLING:
+                raise ValueError(f"Unsupported JPEG chroma subsampling: {jpeg_subsampling!r}")
+            if not 1 <= jpeg_quality <= 100:
+                raise ValueError(f"JPEG quality must be between 1 and 100, got {jpeg_quality!r}")
 
         results = []
         for image in images:

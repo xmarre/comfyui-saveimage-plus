@@ -1,6 +1,9 @@
 name: Tests
 on:
   push:
+    branches:
+      - main
+      - master
   pull_request:
 
 permissions:
@@ -8,8 +11,8 @@ permissions:
 
 jobs:
   python:
-    name: Python ${{ matrix.python }} / Pillow ${{ matrix.pillow }}
-    runs-on: ubuntu-latest
+    name: Python ${{ matrix.python }} / Pillow ${{ matrix.pillow || 'latest' }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -17,8 +20,13 @@ jobs:
           # Oldest Pillow allowed by ComfyUI's requirements, and the latest release.
           - python: "3.10"
             pillow: "==10.1.0"
+            os: ubuntu-latest
           - python: "3.13"
             pillow: ""
+            os: ubuntu-latest
+          - python: "3.13"
+            pillow: ""
+            os: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

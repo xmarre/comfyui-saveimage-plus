@@ -168,6 +168,20 @@ test("JPEG widgets stay visible while file_type is driven by a link", async () =
   assert.deepEqual(jpegHidden(node), [true, true, true, true]);
 });
 
+test("a JPEG widget with a linked input stays visible", async () => {
+  const node = create(await register());
+  node.inputs.push({ name: "jpeg_quality", widget: { name: "jpeg_quality" }, link: null });
+  node.inputs[2].link = 7;
+  node.onConnectionsChange(1, 2, true, { id: 7 }, node.inputs[2]);
+  assert.deepEqual(jpegHidden(node), [false, true, true, true]);
+  selectFileType(node, "JPEG");
+  selectFileType(node, "PNG");
+  assert.deepEqual(jpegHidden(node), [false, true, true, true]);
+  node.inputs[2].link = null;
+  node.onConnectionsChange(1, 2, false, null, node.inputs[2]);
+  assert.deepEqual(jpegHidden(node), [true, true, true, true]);
+});
+
 test("connection changes never shrink the node", async () => {
   const node = create(await register());
   selectFileType(node, "JPEG");

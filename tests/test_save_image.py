@@ -234,6 +234,13 @@ def test_function_defaults_match_input_defaults():
         assert parameters[name].default == options["default"], name
 
 
+def test_existing_positional_arguments_keep_their_meaning(output_dir, cli_args):
+    result = SaveImagePlus().save_images(make_batch(), "pos", "JPEG", False, PROMPT, EXTRA_PNGINFO)
+    path = os.path.join(output_dir, result["ui"]["images"][0]["filename"])
+    assert jpeg_workflow_metadata(path) == {"prompt": PROMPT, **EXTRA_PNGINFO}
+    assert sampling_factors(path) == [(1, 1), (1, 1), (1, 1)]
+
+
 def test_subsampling_mapping_matches_pillow_values():
     assert SaveImagePlus.JPEG_SUBSAMPLING == {"4:4:4": 0, "4:2:2": 1, "4:2:0": 2}
 
@@ -293,6 +300,15 @@ def test_jpeg_invalid_subsampling_raises(output_dir, cli_args):
     assert os.listdir(output_dir) == []
 
 
+@pytest.mark.parametrize("quality", [0, -1, 101])
+def test_jpeg_out_of_range_quality_raises(output_dir, cli_args, quality):
+    # Values arriving through links are not range-checked by ComfyUI, and
+    # Pillow would silently treat -1 as its default quality.
+    with pytest.raises(ValueError, match="quality"):
+        save(output_dir, "JPEG", jpeg_quality=quality)
+    assert os.listdir(output_dir) == []
+
+
 @pytest.mark.parametrize("subsampling", ["4:4:4", "4:2:0"])
 def test_jpeg_optimize_changes_huffman_tables_only(output_dir, cli_args, subsampling):
     images = make_batch()
@@ -337,38 +353,13 @@ def test_legacy_jpeg_configuration_is_reproducible(output_dir, cli_args):
         assert f.read() == reference.getvalue()
 
 
-@pytest.mark.parametrize("optimize, progressive", [(True, False), (False, True), (True, True)])
-def test_jpeg_high_entropy_image_does_not_overflow_encoder_buffer(output_dir, cli_args, optimize, progressive):
-    # Uniform noise at quality 94 with 4:4:4 needs about 18 bits per pixel,
-    # more than the one byte per pixel Pillow reserves for optimized or
-    # progressive output below quality 95.
-    noise = numpy.random.default_rng(0).random((512, 512, 3), dtype=numpy.float32)
-    maxblock = ImageFile.MAXBLOCK
-    _, (path,) = save(output_dir, "JPEG", images=[FakeTensor(noise)], jpeg_quality=94,
-                      jpeg_optimize=optimize, jpeg_progressive=progressive)
-    assert ImageFile.MAXBLOCK == maxblock
-    assert os.path.getsize(path) * 8 / (512 * 512) > 8
-    with Image.open(path) as im:
-        im.load()
-        assert im.size == (512, 512)
-    assert jpeg_workflow_metadata(path)["prompt"] == PROMPT
+def noise_batch(width, height, seed=0):
+    return [FakeTensor(numpy.random.default_rng(seed).random((height, width, 3), dtype=numpy.float32))]
 
 
-def test_jpeg_encoder_buffer_setting_restored_after_error(output_dir, cli_args, monkeypatch):
-    maxblock = ImageFile.MAXBLOCK
-
-    def failing_save(self, *args, **kwargs):
-        assert ImageFile.MAXBLOCK > maxblock
-        raise OSError("simulated encoder failure")
-
-    monkeypatch.setattr(Image.Image, "save", failing_save)
-    with pytest.raises(OSError, match="simulated"):
-        save(output_dir, "JPEG")
-    assert ImageFile.MAXBLOCK == maxblock
-
-
-def test_jpeg_sequential_unoptimized_save_leaves_buffer_setting_alone(output_dir, cli_args, monkeypatch):
-    maxblock = ImageFile.MAXBLOCK
+@pytest.fixture
+def recorded_maxblock(monkeypatch):
+    """Record ImageFile.MAXBLOCK at every Image.save call."""
     seen = []
     original = Image.Image.save
 
@@ -377,8 +368,82 @@ def test_jpeg_sequential_unoptimized_save_leaves_buffer_setting_alone(output_dir
         return original(self, *args, **kwargs)
 
     monkeypatch.setattr(Image.Image, "save", recording_save)
-    save(output_dir, "JPEG", **LEGACY_JPEG)
-    assert seen == [maxblock]
+    return seen
+
+
+# Pillow reserves one byte per pixel (two at quality >= 95) for optimized or
+# progressive output. Uniform noise with 4:4:4 needs about 18 bits per pixel
+# at quality 94 and about 24 at quality 100 (optimized), exceeding both.
+@pytest.mark.parametrize("quality", [94, 100])
+@pytest.mark.parametrize("optimize, progressive", [(True, False), (False, True), (True, True)])
+def test_jpeg_high_entropy_image_does_not_overflow_encoder_buffer(output_dir, cli_args, recorded_maxblock,
+                                                                  quality, optimize, progressive):
+    maxblock = ImageFile.MAXBLOCK
+    _, (path,) = save(output_dir, "JPEG", images=noise_batch(512, 512), jpeg_quality=quality,
+                      jpeg_optimize=optimize, jpeg_progressive=progressive)
+    # The first attempt overflowed and was repeated with a larger buffer.
+    assert len(recorded_maxblock) == 2
+    assert recorded_maxblock[0] == maxblock < recorded_maxblock[1]
+    assert ImageFile.MAXBLOCK == maxblock
+    assert os.listdir(output_dir) == [os.path.basename(path)]
+    assert os.path.getsize(path) * 8 / (512 * 512) > (16 if quality >= 95 else 8)
+    with Image.open(path) as im:
+        im.load()
+        assert im.size == (512, 512)
+        assert bool(im.info.get("progressive")) == progressive
+    assert jpeg_workflow_metadata(path)["prompt"] == PROMPT
+
+
+def test_jpeg_thin_high_entropy_image(output_dir, cli_args, recorded_maxblock):
+    # A one-pixel-high image is encoded as a full MCU strip; its output
+    # exceeds Pillow's 64 KiB minimum buffer and is saved by the retry.
+    _, (path,) = save(output_dir, "JPEG", images=noise_batch(30000, 1), jpeg_quality=100)
+    assert len(recorded_maxblock) == 2
+    assert os.path.getsize(path) > 65536
+    with Image.open(path) as im:
+        im.load()
+        assert im.size == (30000, 1)
+
+
+def test_jpeg_typical_save_does_not_touch_buffer_setting(output_dir, cli_args, recorded_maxblock):
+    maxblock = ImageFile.MAXBLOCK
+    save(output_dir, "JPEG", images=make_batch(2), jpeg_progressive=True)
+    assert recorded_maxblock == [maxblock, maxblock]
+
+
+@pytest.mark.parametrize("settings", [{}, {"jpeg_optimize": False, "jpeg_progressive": True}])
+def test_jpeg_encoder_error_raised_after_one_retry(output_dir, cli_args, monkeypatch, settings):
+    maxblock = ImageFile.MAXBLOCK
+    seen = []
+
+    def failing_save(self, *args, **kwargs):
+        seen.append(ImageFile.MAXBLOCK)
+        raise OSError(f"simulated encoder failure {len(seen)}")
+
+    monkeypatch.setattr(Image.Image, "save", failing_save)
+    with pytest.raises(OSError, match="failure 2"):
+        save(output_dir, "JPEG", **settings)
+    assert len(seen) == 2 and seen[0] == maxblock < seen[1]
+    assert ImageFile.MAXBLOCK == maxblock
+
+
+def test_jpeg_sequential_unoptimized_error_is_not_retried(output_dir, cli_args, monkeypatch):
+    seen = []
+
+    def failing_save(self, *args, **kwargs):
+        seen.append(ImageFile.MAXBLOCK)
+        raise OSError("simulated encoder failure")
+
+    monkeypatch.setattr(Image.Image, "save", failing_save)
+    with pytest.raises(OSError, match="simulated"):
+        save(output_dir, "JPEG", **LEGACY_JPEG)
+    assert len(seen) == 1
+
+
+def test_jpeg_sequential_unoptimized_save_leaves_buffer_setting_alone(output_dir, cli_args, recorded_maxblock):
+    maxblock = ImageFile.MAXBLOCK
+    save(output_dir, "JPEG", images=noise_batch(512, 512), **{**LEGACY_JPEG, "jpeg_quality": 94})
+    assert recorded_maxblock == [maxblock]
 
 
 # --- Metadata -----------------------------------------------------------------

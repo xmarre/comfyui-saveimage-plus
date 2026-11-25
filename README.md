@@ -18,7 +18,7 @@ git clone https://github.com/Goktug/comfyui-saveimage-plus
 
 ## JPEG settings
 
-These settings apply only when `file_type` is `JPEG`, and the node shows them only for that format. Their values are kept when switching formats. PNG and WEBP output is not affected; lossy WEBP always uses quality 90.
+These settings apply only when `file_type` is `JPEG`, and the node shows them only for that format (they also stay visible while `file_type`, or the setting itself, is connected to another node). Their values are kept when switching formats. PNG and WEBP output is not affected; lossy WEBP always uses quality 90.
 
 | Setting | Default | Values |
 |---|---|---|
@@ -45,7 +45,7 @@ At the same quality setting, 4:4:4 produces noticeably larger files than 4:2:0 (
 
 ### Huffman optimization
 
-`jpeg_optimize` computes Huffman tables for the specific image instead of using the standard tables. This only changes the lossless entropy coding: decoded pixels are identical, and files are typically a few percent smaller. The cost is a second pass over the image, roughly two to three times the encoding time of the unoptimized encoder, and buffering of the whole image's DCT coefficients during encoding (about 6 bytes per pixel with 4:4:4 and 3 bytes per pixel with 4:2:0).
+`jpeg_optimize` computes Huffman tables for the specific image instead of using the standard tables. This only changes the lossless entropy coding: decoded pixels are identical, and files are typically a few percent smaller. The cost is a second pass over the image, roughly two to three times the encoding time of the unoptimized encoder, and buffering of the whole image's DCT coefficients during encoding (about 6 bytes per pixel with 4:4:4 and 3 bytes per pixel with 4:2:0). With very noisy or grainy images at high quality, the compressed data can exceed the output buffer Pillow reserves in this mode; such a save is repeated automatically with a larger buffer, which costs a second encoding pass.
 
 ### Progressive encoding
 
@@ -67,3 +67,12 @@ Use PNG or lossless WEBP when the image must be preserved exactly, for example f
 ### Metadata limits
 
 Workflow metadata in JPEG files is stored in a single EXIF segment, which the JPEG format limits to about 64 KB. Saving fails with "EXIF data is too long" if a workflow is larger than that; use PNG for such workflows or enable `remove_metadata`.
+
+## Development
+
+Run the tests from the repository root:
+
+```sh
+python -m pytest tests
+node --import ./tests/js/register.mjs --test tests/js/*.test.mjs
+```
